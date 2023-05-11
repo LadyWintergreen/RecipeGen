@@ -4,7 +4,7 @@ import os
 import glob
 import re
 
-EOS_token = "EOS"
+EOS_token = 1
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 class Language:
@@ -12,12 +12,15 @@ class Language:
         self.name = name
         self.word2index = {}
         self.word2count = {}
-        self.index2word = {0: "SOS", 1: "EOS"}
-        self.n_words = 2  # Count SOS and EOS
+        self.index2word = {0: "PAD", 1: "SOS", 2: "EOS"}
+        self.n_words = 3  # Count PAD, SOS, and EOS
 
     def addSentence(self, sentence):
         for word in sentence.split(' '):
             self.addWord(word)
+
+    def __len__(self):
+        return self.n_words
 
     def addWord(self, word):
         if word not in self.word2index:
@@ -32,7 +35,7 @@ def build_language(data_path):
     all_ingredients = []
     all_recipes = []
     for path in data_path: #manual path list:
-        recipes = process_text_data(path)
+        recipes = process_all_text_data(path)
         for r in recipes:
             all_ingredients.append(r[0])
             all_recipes.append(r[1])
@@ -45,7 +48,7 @@ def build_language(data_path):
     return ingredient_lang, recipe_lang
         
 
-def process_text_data(path):
+def process_all_text_data(path):
     print("Processing text data from {}".format(path))
     recipes = []
     files = glob.glob(path + "/*.txt")
@@ -82,32 +85,20 @@ def text_to_recipe_processing(line):
         return None
     return (str(title + ingredients), steps)
 
-test = process_text_data("Cooking_Dataset/test")
-print(test[0])
+test = process_all_text_data("Cooking_Dataset/test")
+print(test[10])
 
-def collate_fn(data): # may be able to just pack instead
-    def merge(sequences):
-        lengths = [len(seq) for seq in sequences]
-        padded_seqs = torch.zeros(len(sequences), max(lengths)).long()
-        for i, seq in enumerate(sequences):
-            end = lengths[i]
-            padded_seqs[i, :end] = seq[:end]
-        return padded_seqs, lengths
-    #Goal is to create minibatch tensors from single batch data
-    # sort a list by sequence length (descending order) to use pack_padded_sequence
-    data.sort(key=lambda x: len(x[0]), reverse=True)
-    # seperate source and target sequences
-    src_seqs, trg_seqs = zip(*data)
-    # merge sequences (from tuple of 1D tensor to 2D tensor)
-    src_seqs, src_lengths = merge(src_seqs)
-    trg_seqs, trg_lengths = merge(trg_seqs)
-
-    return src_seqs, src_lengths, trg_seqs, trg_lengths
-
+def collate_fn(batch):
+    label_list, text_list = [], [] 
+    for (_label, _text) in batch: 
+        label_list.append(label_transform(_label)) 
+        processed_text = torch.tensor(text_transform(_text)) 
+        text_list.append(processed_text) 
+    return torch.tensor(label_list), pad_sequence(text_list, padding_value=3.0)
 
 class RecipeData(Dataset):
-    def __init__(self, path, ing_lang, instr_lang):
-        self.all_recipes = process_text_data(path)
+    def __init__(self, recipes, ing_lang, instr_lang):
+        self.all_recipes = recipes
         self.ing_lang = ing_lang
         self.instr_lang = instr_lang
 
@@ -116,6 +107,8 @@ class RecipeData(Dataset):
     
     def __getitem__(self, ndx):
         item = self.all_recipes[ndx]
+        print(ndx)
+        print(item)
         ingredients, steps = tensorsFromPair(item, self.ing_lang, self.instr_lang)
         return ingredients, steps
 

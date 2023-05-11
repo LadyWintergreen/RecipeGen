@@ -1,0 +1,152 @@
+from __future__ import unicode_literals, print_function, division
+from io import open
+import unicodedata
+import string
+import re
+import random
+from tqdm import trange
+
+import torch
+import torch.nn as nn
+from torch import optim
+import torch.nn.functional as F
+from torch.utils.data import DataLoader
+from utils import Language, RecipeData, collate_fn, build_language, process_all_text_data
+from transformers import DataCollatorWithPadding
+
+DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+TEACHER_FORCING = 16
+learning_rate = 0.001
+dataset_path = ["Cooking_Dataset/test", "Cooking_Dataset/dev", "Cooking_Dataset/train"]
+BATCH_SIZE = 1
+NUM_EPOCHS = 50
+MAX_LENGTH = 256
+hidden_dimensions = 256
+encoder_dropout = 0.5
+decoder_dropout = 0.5
+
+class Encoder(nn.Module):
+    def __init__(self, input_dim, embed_dim, hidden_size, dropout):
+        super().__init__()
+        self.hidden_size = hidden_size
+        self.embedding = nn.Embedding(input_dim, embed_dim)
+        self.lstm = nn.LSTM(embed_dim, hidden_size, dropout=dropout)
+        self.dropout = nn.Dropout(dropout)
+
+    def forward(self, source):
+        embeds = self.dropout(self.embedding(source))
+        outputs, (hidden, cell) = self.lstm(embeds)
+        return hidden, cell
+    
+    def init_hidden(self):
+        return torch.zeros(self.hidden_size)
+    
+class Decoder(nn.Module):
+    def __init__(self, output_dim, embed_dim, hidden_size, dropout) -> None:
+        super().__init__()
+        self.output_dim = output_dim
+        self.embed_dim = embed_dim
+        self.hidden_size = hidden_size
+        self.embedding = nn.Embedding(output_dim, embed_dim)
+        self.lstm = nn.LSTM(embed_dim, hidden_size, dropout=dropout)
+        self.fc = nn.Linear(hidden_size, output_dim)
+        self.softmax = nn.LogSoftmax(dim=1)
+
+    def forward(self, input, hidden, cell):
+        inputs = input.unsqueeze(0)
+        embeds = self.dropout(self.embedding(input))
+        outputs, (hidden, cell) = self.lstm(embeds, (hidden, cell))
+        prediction = self.fc(outputs.squeeze(0))
+        return prediction, hidden, cell
+
+class Seq2Seq(nn.Module):
+    def __init__(self, encoder, decoder, device) -> None:
+        super().__init__()
+        self.encoder = encoder
+        self.decoder = decoder
+        self.device = device
+        assert encoder.hidden_size == decoder.hidden_size
+
+    def forward(self, source, target, tfr):
+        print("shape: {}".format(source.shape))
+        input_length = source.size(0)
+        batch_size = target.shape[1]
+        target_len = target.shape[0]
+        target_vocab_size = self.decoder.output_dim
+        outputs = torch.zeros(target_len, batch_size, target_vocab_size).to(self.device)
+        hidden, cell = self.encoder(source[i])
+        decoder_input = target[0, :]
+        for token in range(1,target_len):
+            output, hidden, cell = self.decoder(decoder_input, hidden, cell)
+            outputs[token] = output
+            teacher_force = random.random < tfr
+            decoder_input = target[token] if teacher_force else output.argmax(1)
+        return outputs
+    
+
+ingredient_vocabulary, recipe_vocabulary = build_language(dataset_path)
+input_dimensions = len(ingredient_vocabulary)
+output_dimensions = len(recipe_vocabulary)
+
+encoder = Encoder(input_dim=input_dimensions, embed_dim=hidden_dimensions, hidden_size=hidden_dimensions, dropout=encoder_dropout)
+decoder = Decoder(output_dim=output_dimensions, embed_dim=hidden_dimensions, hidden_size=hidden_dimensions, dropout=decoder_dropout)
+model = Seq2Seq(encoder, decoder, DEVICE)
+train_recipes = process_all_text_data("Cooking_Dataset/train")
+dev_recipes = process_all_text_data("Cooking_Dataset/dev")
+training_data = RecipeData(train_recipes, ing_lang=ingredient_vocabulary, instr_lang=recipe_vocabulary)
+validation_data = RecipeData(dev_recipes, ing_lang=ingredient_vocabulary, instr_lang=recipe_vocabulary)
+
+train_loader = DataLoader(training_data,batch_size=BATCH_SIZE, shuffle=True, collate_fn=collate_fn)
+val_loader = DataLoader(validation_data,batch_size=BATCH_SIZE, shuffle=True, collate_fn=collate_fn)
+
+loss = nn.NLLLoss()
+
+def run_epoch(model, dataloader, optimiser, criterion):
+    model.train()
+    epoch_loss = 0
+    for ingredients, ing_len, steps, step_len in dataloader:
+        optimiser.zero_grad()
+        output = model(ingredients, steps, TEACHER_FORCING)
+        out_dim = output.shape[-1]
+        out = output[1:].view(-1, out_dim) 
+        steps = steps[1:].view(-1)
+        loss = criterion(out, steps)
+        loss.backward()
+        torch.nn.utils.clip_grad_norm_(model.parameters(), 1)
+        optimiser.step()
+        epoch_loss += loss.item()
+    return epoch_loss/len(dataloader)
+
+def validate(model, dataloader, criterion):
+    model.eval()
+    epoch_loss = 0
+    with torch.no_grad():
+        for ingredients, steps in dataloader:
+            output = model(ingredients, steps, TEACHER_FORCING)
+            out_dim = output.shape[-1]
+            out = output[1:].view(-1, out_dim) 
+            steps = steps[1:].view(-1)
+            loss = criterion(out, steps)
+            epoch_loss += loss.item()
+    return epoch_loss/len(dataloader)
+
+def train(model, trainloader, valloader, optimiser, criterion, num_epochs):
+    for epoch in trange(num_epochs):
+        train_loss = run_epoch(model, trainloader, optimiser, criterion)
+        validation_loss = validate(model, valloader, criterion)
+        print("Training Accuracy: {}  |   Validation Accuracy: {}".format(train_loss,validation_loss))
+
+
+def init_weights(model):
+    for name, param in model.named_parameters():
+        nn.init.uniform_(param.data, -0.08, 0.08)
+        
+model.apply(init_weights)
+model.to(DEVICE)
+optimiser = optim.Adam(model.parameters(), lr = 0.01)
+
+
+train(model, train_loader, val_loader, optimiser, loss, 10)
+
+
+#how do we need to set up the complete vocabularies?
