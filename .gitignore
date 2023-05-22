@@ -4,6 +4,7 @@ Clean_Data
 Dataset
 deprecated
 resources.txt
+Logs
 
 # Byte-compiled / optimized / DLL files
 __pycache__/
